@@ -1,0 +1,5 @@
+[console_scripts]
+app = icdc_data_generator_mvp.app:main
+icdc-analyze = icdc_data_generator_mvp.cli:main
+icdc-build-schemas = icdc_data_generator_mvp.schema_builder:main
+icdc-generate = icdc_data_generator_mvp.generator:main
