@@ -14,6 +14,7 @@ It does three things:
 
 - Python **3.10+**
 - uv (fast Python package manager)
+- neo4j database
 
 Install uv:
 
@@ -55,6 +56,8 @@ uv run python -m icdc_data_generator_mvp.app
 ## 🧪 CLI Usage
 
 ```bash
+uv run icdc-build-schemas
+  
 uv run icdc-analyze \
   --study OSA01 \
   --nodes study,sample,case
