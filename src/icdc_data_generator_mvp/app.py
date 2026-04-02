@@ -22,45 +22,17 @@ from icdc_data_generator_mvp.io import load_json_rows
 from icdc_data_generator_mvp.neo4j_loader import fetch_rows_from_neo4j
 from icdc_data_generator_mvp.reporting import write_markdown_report
 from icdc_data_generator_mvp.schema import load_node_schema
-from icdc_data_generator_mvp.viz import generate_visual_report
+from icdc_data_generator_mvp.viz import generate_visual_report 
 
+BASE_DIR = Path(__file__).resolve().parent
+TABLE_JS = (BASE_DIR / "static" / "table.js").read_text(encoding="utf-8")
 
-AG_GRID_HEAD = """
+AG_GRID_HEAD = f"""
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css">
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
 <script>
-  function initGrid() {
-    const root = document.querySelector("#table-root");
-    if (!root || root.dataset.agReady === "true") return;
-    if (typeof agGrid === "undefined") return;
-
-    const rowTag = document.querySelector("#table-root-data");
-    const colTag = document.querySelector("#table-root-cols");
-    if (!rowTag || !colTag) return;
-
-    const rowData = JSON.parse(rowTag.textContent);
-    const colDefs = JSON.parse(colTag.textContent);
-
-    agGrid.createGrid(root, {
-      columnDefs: colDefs,
-      rowData: rowData,
-      defaultColDef: {
-        sortable: true,
-        filter: true,
-        resizable: true,
-        flex: 1,
-        minWidth: 120
-      },
-      pagination: true,
-      paginationPageSize: 25
-    });
-
-    root.dataset.agReady = "true";
-  }
-
-  window.addEventListener("load", initGrid);
-  new MutationObserver(initGrid).observe(document.body, { childList: true, subtree: true });
+  {TABLE_JS}
 </script>
 """
 
@@ -107,6 +79,7 @@ def df_to_html(curr_node_relations: pd.DataFrame):
         data-col-defs='{cols}'>
     </div>
     """
+
 def df_to_html2(curr_node_relations: pd.DataFrame):
     if curr_node_relations is None or curr_node_relations.empty:
         display_df = pd.DataFrame(
@@ -127,6 +100,12 @@ def df_to_html2(curr_node_relations: pd.DataFrame):
     col_json = json.dumps([{"field": str(c)} for c in display_df.columns], ensure_ascii=False)
 
     return f"""
+    <input
+        id="table-search"
+        type="text"
+        placeholder="Search table..."
+        style="margin-bottom: 8px; width: 300px; padding: 6px;"
+    />
     <div id="table-root" class="ag-theme-quartz" style="height: 700px; width: 100%;"></div>
     <script type="application/json" id="table-root-data">{row_json}</script>
     <script type="application/json" id="table-root-cols">{col_json}</script>
@@ -399,13 +378,24 @@ def show_node_sumamry_tables(
         generated_df = pd.DataFrame()
 
 
-    return summary_text, results_df, generated_df, df_to_html2(results_df)
+    return summary_text, generated_df, df_to_html2(results_df)
 
-    
+def filter_df(df, query):
+    if df is None or query is None or query.strip() == "":
+        return df
+
+    query = query.lower()
+
+    mask = df.apply(
+        lambda row: row.astype(str).str.lower().str.contains(query).any(),
+        axis=1
+    )
+
+    return df[mask]    
 
 with gr.Blocks(
     title="ICDC Synthetic Data Demo",
-    head=AG_GRID_HEAD
+    head=AG_GRID_HEAD,
 ) as demo:
     gr.Markdown("# ICDC Synthetic Data Demo\nAnalyze learned property relationships, visualize them, and generate synthetic rows.")
 
@@ -421,12 +411,13 @@ with gr.Blocks(
             file_types=[".env", ".txt"],
             type="filepath",
         )
-
+    with gr.Row():
+        study_id = gr.Textbox(label="Study ID", placeholder="OSA01")
+    with gr.Row():
+        node_names = gr.CheckboxGroup(choices=[], label="Nodes")
     with gr.Row():
         schema_mode = gr.Radio(["generated", "upload"], value="generated", label="Schema mode")
         # node_name = gr.Dropdown(choices=[], label="Node", allow_custom_value=True)
-        node_names = gr.CheckboxGroup(choices=[], label="Nodes")
-        study_id = gr.Textbox(label="Study ID", placeholder="OSA01")
 
     schema_yaml_text = gr.Textbox(
         label="Node schema YAML",
@@ -453,14 +444,13 @@ with gr.Blocks(
     relationships_grid = gr.HTML()
     generated_grid = gr.HTML()
 
-    relationships_table = gr.Dataframe(
-        label="Relationships",
-        interactive=False,
-    )
-    generated_table = gr.Dataframe(
-        label="Generated data",
-        interactive=False,
-    )
+    # relationships_table = gr.Dataframe(
+    #     label="Relationships",
+    #     interactive=False,
+    # )
+
+    search_box = gr.Textbox(label="Search", placeholder="Type to filter...")
+    generated_table = gr.Dataframe()
 
     charts = gr.Gallery(label="Visualizations", columns=2, height=320)
 
@@ -490,12 +480,23 @@ with gr.Blocks(
         inputs=[schema_mode],
         outputs=[schema_yaml_text],
     )
+
+    generated_table = gr.Dataframe(
+        label="Generated data",
+        interactive=False,
+    )
     relationships_grid = gr.HTML()
     # gr.HTML(df_to_html(None), js_on_load=js)
     node_view.change(
         show_node_sumamry_tables,
         inputs=[node_view, results_state, generated_state, summary_state],
-        outputs=[summary_md, relationships_table, generated_table, relationships_grid], 
+        outputs=[summary_md, generated_table, relationships_grid], 
+    )
+
+    search_box.change(
+        fn=filter_df,
+        inputs=[generated_table, search_box],
+        outputs=generated_table
     )
     
     print(f"sutdy {study_id}")
@@ -527,7 +528,6 @@ with gr.Blocks(
 
 def main() -> None:
     demo.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", "7860")))
-
 
 if __name__ == "__main__":
     main()

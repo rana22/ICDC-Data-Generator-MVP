@@ -18,6 +18,217 @@ def _safe_filename(value: str) -> str:
     return out or "chart"
 
 
+def _save_line_chart(
+    x: pd.Series,
+    y_series: dict[str, pd.Series],
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    out_path: Path,
+) -> Path:
+    plt.figure(figsize=(10, 6))
+    for label, y in y_series.items():
+        plt.plot(x, y, marker="o", label=label)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=160, bbox_inches="tight")
+    plt.close()
+    return out_path
+
+
+def plot_evaluator_learning_curve(
+    results: pd.DataFrame,
+    output_dir: str | Path,
+    filename: str = "evaluator_learning_curve.png",
+) -> Path | None:
+    """
+    Plots evaluator performance against evidence size.
+    This is not epoch-based learning; it shows whether performance improves
+    as the amount of evidence increases.
+    """
+    if results is None or results.empty:
+        return None
+
+    df = results.copy()
+
+    x_col = _first_existing_column(df, ["train_rows", "row_count", "support", "total_rows"])
+    y_col = _first_existing_column(df, ["heldout_accuracy", "predictive_strength", "strength"])
+
+    if not x_col or not y_col:
+        return None
+
+    df[x_col] = pd.to_numeric(df[x_col], errors="coerce")
+    df[y_col] = pd.to_numeric(df[y_col], errors="coerce")
+    df = df.dropna(subset=[x_col, y_col]).sort_values(x_col).reset_index(drop=True)
+
+    if df.empty:
+        return None
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / filename
+
+    # Smooth a bit so the trend is easier to read
+    window = max(1, len(df) // 10)
+    y_smooth = df[y_col].rolling(window=window, min_periods=1).mean()
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(df[x_col], y_smooth, marker="o", label=f"{y_col} (smoothed)")
+
+    if "baseline_accuracy" in df.columns:
+        baseline = pd.to_numeric(df["baseline_accuracy"], errors="coerce")
+        if baseline.notna().any():
+            plt.plot(df[x_col], baseline.rolling(window=window, min_periods=1).mean(),
+                     marker="o", label="baseline_accuracy (smoothed)")
+
+    plt.title("Evaluator Performance vs Evidence Size")
+    plt.xlabel(x_col)
+    plt.ylabel(y_col)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    plt.savefig(out_path, dpi=160, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved evaluator curve → {out_path}")
+    return out_path
+
+def plot_loss_error_curve(
+    results: pd.DataFrame,
+    output_dir: str | Path,
+    filename: str = "loss_error_curve.png",
+) -> Path | None:
+    """
+    Generates and saves a loss/error curve.
+    Returns the saved file path, or None if required data is missing.
+    """
+    if results is None or results.empty:
+        return None
+
+    df = results.copy()
+
+    strength_col = _first_existing_column(df, ["strength", "score", "confidence", "weight"])
+    if not strength_col or not pd.api.types.is_numeric_dtype(df[strength_col]):
+        return None
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / filename
+
+    df = df.sort_values(strength_col, ascending=False).reset_index(drop=True)
+
+    strength = pd.to_numeric(df[strength_col], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    loss = 1.0 - strength
+
+    pred_col = _first_existing_column(df, ["predictive_strength"])
+    if pred_col and pd.api.types.is_numeric_dtype(df[pred_col]):
+        predictive_strength = pd.to_numeric(df[pred_col], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+        error = 1.0 - predictive_strength
+    else:
+        error = loss.copy()
+
+    window = max(1, len(df) // 10)
+    loss_smooth = loss.rolling(window=window, min_periods=1).mean()
+    error_smooth = error.rolling(window=window, min_periods=1).mean()
+
+    x = range(1, len(df) + 1)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(x, loss_smooth, marker="o", label="Model Loss (1 - strength)")
+    plt.plot(x, error_smooth, marker="o", label="Prediction Error")
+
+    plt.title("Model Learning Behavior (Loss & Error)")
+    plt.xlabel("Relationships ranked from strongest to weakest")
+    plt.ylabel("Error (lower is better)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    plt.savefig(out_path, dpi=160, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved loss curve → {out_path}")
+    return out_path
+
+# def plot_loss_error_curve(results: pd.DataFrame, output_dir: str | Path, filename: str = "loss_error_curve.png") -> Path | None:
+#     """
+#     Demo loss/error curve.
+
+#     If the table has real training columns, uses them.
+#     Otherwise derives a proxy curve from relationship strength.
+#     """
+#     if results is None or results.empty:
+#         return None
+
+#     df = results.copy()
+
+#     # Prefer explicit loss columns if they exist.
+#     train_loss_col = _first_existing_column(df, ["train_loss", "loss", "error", "train_error"])
+#     test_loss_col = _first_existing_column(df, ["test_loss", "validation_loss", "val_loss", "test_error", "validation_error"])
+
+#     output_dir = Path(output_dir)
+#     output_dir.mkdir(parents=True, exist_ok=True)
+#     out_path = output_dir / filename
+
+#     if train_loss_col or test_loss_col:
+#         x = pd.Series(range(1, len(df) + 1), name="step")
+#         y_series: dict[str, pd.Series] = {}
+
+#         if train_loss_col and pd.api.types.is_numeric_dtype(df[train_loss_col]):
+#             y_series["Train loss"] = df[train_loss_col].fillna(method="ffill").fillna(method="bfill")
+#         if test_loss_col and pd.api.types.is_numeric_dtype(df[test_loss_col]):
+#             y_series["Test loss"] = df[test_loss_col].fillna(method="ffill").fillna(method="bfill")
+
+#         if y_series:
+#             return _save_line_chart(
+#                 x=x,
+#                 y_series=y_series,
+#                 title="Loss / Error Curve",
+#                 xlabel="Step",
+#                 ylabel="Loss / Error",
+#                 out_path=out_path,
+#             )
+
+#     # Proxy curve from pairwise relationship strength.
+#     strength_col = _first_existing_column(df, ["strength", "score", "confidence", "weight"])
+#     if not strength_col or not pd.api.types.is_numeric_dtype(df[strength_col]):
+#         return None
+
+#     df = df.sort_values(strength_col, ascending=False).reset_index(drop=True)
+#     x = pd.Series(range(1, len(df) + 1), name="rank")
+
+#     strength = df[strength_col].fillna(0.0).clip(lower=0.0, upper=1.0)
+#     loss_proxy = 1.0 - strength
+
+#     pred_col = _first_existing_column(df, ["predictive_strength", "prediction_strength"])
+#     if pred_col and pd.api.types.is_numeric_dtype(df[pred_col]):
+#         error_proxy = 1.0 - df[pred_col].fillna(0.0).clip(lower=0.0, upper=1.0)
+#     else:
+#         error_proxy = loss_proxy
+
+#     # Smooth slightly so the chart looks better in a demo.
+#     window = max(1, len(df) // 10)
+#     loss_smooth = loss_proxy.rolling(window=window, min_periods=1).mean()
+#     error_smooth = error_proxy.rolling(window=window, min_periods=1).mean()
+
+#     return _save_line_chart(
+#         x=x,
+#         y_series={
+#             "Loss proxy": loss_smooth,
+#             "Error proxy": error_smooth,
+#         },
+#         title="Loss / Error Curve",
+#         xlabel="Ranked relationship",
+#         ylabel="Loss / Error",
+#         out_path=out_path,
+#     )
+
+
 def _first_existing_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
     lower_map = {c.lower(): c for c in df.columns}
     for name in candidates:
@@ -196,6 +407,16 @@ def generate_visual_report(
                 out_path=scatter_path,
             )
         )
+
+    # 5) Loss / error curve
+    loss_path = plot_loss_error_curve(df, output_dir)
+    if loss_path:
+        chart_paths.append(loss_path)
+
+    # 6 learning
+    loss_err = plot_evaluator_learning_curve(df, output_dir)
+    if loss_err:
+        chart_paths.append(loss_err)
 
     return chart_paths
 

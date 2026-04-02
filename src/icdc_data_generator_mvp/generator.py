@@ -117,6 +117,50 @@ def weighted_choice(prob_map: dict[str, float], rng: np.random.Generator) -> str
     probs = probs / total
     return str(rng.choice(keys, p=probs))
 
+def _mapping_value_set(value: Any) -> set[str]:
+    if value is None:
+        return set()
+
+    if isinstance(value, list):
+        return {str(v).strip() for v in value if str(v).strip()}
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "{}":
+            return set()
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return {str(v).strip() for v in parsed if str(v).strip()}
+            if isinstance(parsed, str):
+                return {parsed.strip()} if parsed.strip() else set()
+        except Exception:
+            return {text}
+        return set()
+
+    return {str(value).strip()} if str(value).strip() else set()
+
+
+def _parse_a_to_b_mapping(value: Any) -> dict[str, set[str]]:
+    if value is None:
+        return {}
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "{}":
+            return {}
+        try:
+            value = json.loads(text)
+        except Exception:
+            return {}
+
+    if not isinstance(value, dict):
+        return {}
+
+    out: dict[str, set[str]] = {}
+    for a_val, b_vals in value.items():
+        out[str(a_val)] = _mapping_value_set(b_vals)
+    return out
 
 class SyntheticDataGenerator:
     def __init__(
@@ -178,6 +222,39 @@ class SyntheticDataGenerator:
 
             fields.append(name)
         return fields
+
+    def _row_is_valid(self, row: dict[str, Any]) -> bool:
+        for rel in self.relationship_list:
+            a_val = normalize_value(row.get(rel.A))
+            b_val = normalize_value(row.get(rel.B))
+
+            if not a_val or not b_val:
+                return False
+
+            raw_map = rel.evidence.get("a_to_b_mapping")
+            mapping = _parse_a_to_b_mapping(raw_map)
+
+            # If we have no mapping for this pair, the row cannot be validated safely.
+            if not mapping:
+                return False
+
+            allowed = mapping.get(a_val)
+            if allowed is None:
+                return False
+
+            if allowed and b_val not in allowed:
+                return False
+
+        return True
+
+    def validate_rows(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        if df is None or df.empty:
+            return df, df
+
+        mask = df.apply(lambda r: self._row_is_valid(r.to_dict()), axis=1)
+        valid_df = df[mask].reset_index(drop=True)
+        invalid_df = df[~mask].reset_index(drop=True)
+        return valid_df, invalid_df
 
     def _build_relationship_list(self) -> list[Relationship]:
         if self.relationships.empty:
@@ -379,17 +456,43 @@ class SyntheticDataGenerator:
             return weighted_choice(probs, self.rng)
         return ""
 
-    def generate_row(self) -> dict[str, Any]:
+    # def generate_row(self) -> dict[str, Any]:
+    #     row: dict[str, Any] = {}
+    #     for field in self.generation_order:
+    #         row[field] = self._sample_field(field, row)
+
+    #     # A whole-row repair pass makes the output coherent across the node,
+    #     # not only pairwise.
+    #     return self._repair_row(row)
+
+    # def generate(self, n: int) -> pd.DataFrame:
+    #     rows = [self.generate_row() for _ in range(n)]
+    #     return pd.DataFrame(rows, columns=self.generation_order)
+    def generate_row(self) -> dict[str, Any] | None:
         row: dict[str, Any] = {}
         for field in self.generation_order:
             row[field] = self._sample_field(field, row)
 
-        # A whole-row repair pass makes the output coherent across the node,
-        # not only pairwise.
-        return self._repair_row(row)
+        row = self._repair_row(row)
+
+        # drop invalid rows here
+        if not self._row_is_valid(row):
+            return None
+
+        return row
+
 
     def generate(self, n: int) -> pd.DataFrame:
-        rows = [self.generate_row() for _ in range(n)]
+        rows: list[dict[str, Any]] = []
+        attempts = 0
+        max_attempts = max(n * 20, 100)
+
+        while len(rows) < n and attempts < max_attempts:
+            attempts += 1
+            row = self.generate_row()
+            if row is not None:
+                rows.append(row)
+
         return pd.DataFrame(rows, columns=self.generation_order)
 
 
@@ -439,16 +542,17 @@ def main() -> None:
         include_low_value_fields=args.include_low_value_fields,
     )
     synthetic_df = generator.generate(args.n)
+    valid_df, invalid_df = generator.validate_rows(synthetic_df)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_dataframe(synthetic_df, output_path)
+    save_dataframe(valid_df, output_path)
 
     # Also save JSON next to CSV for easy inspection.
     json_path = output_path.with_suffix(".json")
-    rows_to_json(synthetic_df.to_dict(orient="records"), json_path)
+    rows_to_json(valid_df.to_dict(orient="records"), json_path)
 
-    print(f"Generated {len(synthetic_df)} synthetic rows")
+    print(f"Generated {len(valid_df)} synthetic rows")
     print(f"Saved: {output_path.resolve()}")
     print(f"Saved: {json_path.resolve()}")
 

@@ -168,7 +168,7 @@ def main() -> None:
         "determinism",
         "stability",
         "doc_alignment",
-        "heldout_accuracy",
+        "heldout_accuracy (test)",
         "baseline_accuracy",
     ]
     print(results[display_cols].head(15).to_string(index=False))
